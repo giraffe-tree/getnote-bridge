@@ -1,0 +1,10 @@
+{
+  "id": "getnote-bridge",
+  "name": "Get Bridge",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Sync your Get 笔记 (biji.com) notes to Obsidian vault.",
+  "author": "giraffetree",
+  "authorUrl": "https://github.com/giraffe-tree",
+  "isDesktopOnly": true
+}
