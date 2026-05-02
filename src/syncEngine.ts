@@ -1,6 +1,12 @@
 import { App, TFile, normalizePath } from 'obsidian';
 import { GetNoteClient, GetNoteApiError } from './getnoteClient';
-import { generateFilename, noteToMarkdown, needsDetail, attachmentFilename, getExtFromUrl } from './formatter';
+import {
+  generateFilename,
+  noteToMarkdown,
+  needsDetail,
+  attachmentFilenameFromUrl,
+  extractInlineImageUrls,
+} from './formatter';
 import type { GetBridgeSettings, GetNote, GetNoteDetail, LastSyncStats, SyncProgress } from './types';
 
 interface NoteIndexEntry {
@@ -124,16 +130,25 @@ export class SyncEngine {
     const targetDir = targetFilePath.substring(0, targetFilePath.lastIndexOf('/'));
 
     // 图片附件存入同级 attachments/ 目录，引用路径为 attachments/{filename}
+    // 来源 1：detail.attachments 中标记为 image 的项
+    // 来源 2：正文 Markdown 中的 ![...](http...) 内联图片（plain_text 等无 attachments 的笔记类型）
     if (this.settings.downloadAttachments) {
-      const imageAtts = (detail.attachments ?? []).filter(a => a.type === 'image');
+      const urls: string[] = [];
+      const seen = new Set<string>();
+      for (const att of (detail.attachments ?? [])) {
+        if (att.type === 'image' && !seen.has(att.url)) { seen.add(att.url); urls.push(att.url); }
+      }
+      for (const url of extractInlineImageUrls(content)) {
+        if (!seen.has(url)) { seen.add(url); urls.push(url); }
+      }
+
       const attDir = normalizePath(`${targetDir}/attachments`);
-      for (let i = 0; i < imageAtts.length; i++) {
-        const att = imageAtts[i];
-        const ext = getExtFromUrl(att.url);
-        const filename = attachmentFilename(note.note_id, i, ext);
+      for (let i = 0; i < urls.length; i++) {
+        const url = urls[i];
+        const filename = attachmentFilenameFromUrl(url, `${note.note_id}_${i}`);
         const absPath = normalizePath(`${attDir}/${filename}`);
-        await this.downloadAttachment(att.url, absPath);
-        content = content.replaceAll(att.url, `attachments/${filename}`);
+        await this.downloadAttachment(url, absPath);
+        content = content.replaceAll(url, `attachments/${filename}`);
       }
     }
 

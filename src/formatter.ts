@@ -23,15 +23,6 @@ export function generateFilename(note: GetNote): string {
   return parts.join('_');
 }
 
-/**
- * 附件本地相对路径（相对于笔记所在目录）
- * {targetDir}/{YYYY}/{MM}/attachments/{noteId}_{index}.{ext}
- * 相对于笔记（同在 {YYYY}/{MM}/ 下），引用路径为 attachments/{noteId}_{index}.{ext}
- */
-export function attachmentFilename(noteId: string, index: number, ext: string): string {
-  return `${noteId}_${index}.${ext}`;
-}
-
 /** 将笔记转换为完整 Markdown（frontmatter + 正文） */
 export function noteToMarkdown(note: GetNoteDetail): string {
   return `${buildFrontmatter(note)}\n${buildBody(note)}`;
@@ -133,8 +124,50 @@ function escapeYaml(text: string): string {
 }
 
 export function getExtFromUrl(url: string): string {
-  const match = url.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
-  return match ? match[1].toLowerCase() : 'jpg';
+  const path = urlPathBasename(url);
+  const m = path.match(/\.([a-zA-Z0-9]+)$/);
+  return m ? m[1].toLowerCase() : 'jpg';
+}
+
+/** 提取 Markdown 正文中的远程图片 URL（仅 http/https） */
+export function extractInlineImageUrls(markdown: string): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const re = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(markdown)) !== null) {
+    const url = m[1].trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    urls.push(url);
+  }
+  return urls;
+}
+
+/** 取 URL 路径解码后的 basename（不含查询串）；无法解析时返回空串 */
+function urlPathBasename(url: string): string {
+  try {
+    const u = new URL(url);
+    const decoded = decodeURIComponent(u.pathname);
+    return decoded.split('/').pop() ?? '';
+  } catch {
+    const noQuery = url.split('?')[0];
+    try { return decodeURIComponent(noQuery.split('/').pop() ?? ''); }
+    catch { return noQuery.split('/').pop() ?? ''; }
+  }
+}
+
+/**
+ * 基于 URL 派生稳定的附件文件名。OSS 路径中的对象名通常已含唯一哈希，
+ * 直接复用可避免内容顺序变化导致重复下载。无法解析时回退到 noteId_index。
+ */
+export function attachmentFilenameFromUrl(url: string, fallback: string): string {
+  const base = urlPathBasename(url);
+  if (base && /\.[a-zA-Z0-9]{2,5}$/.test(base) && base.length <= 120) {
+    return base.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+  }
+  return `${fallback}.${getExtFromUrl(url)}`;
 }
 
 export { AUDIO_NOTE_TYPES };
