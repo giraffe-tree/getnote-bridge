@@ -1,7 +1,6 @@
 import { PluginSettingTab, Setting, App, Notice, setIcon, normalizePath } from 'obsidian';
 import type GetBridgePlugin from '../main';
 import type { GetBridgeSettings, LastSyncStats, QuotaInfo } from './types';
-import { AUDIO_NOTE_TYPES, type NoteType } from './types';
 import { GetNoteClient, GetNoteApiError } from './getnoteClient';
 import { OAuthFlow } from './oauthFlow';
 import { getTooltipManager } from './tooltip';
@@ -11,7 +10,7 @@ export const DEFAULT_SETTINGS: GetBridgeSettings = {
   clientId: '',
   keyExpiresAt: 0,
   targetDir: 'GetNotes',
-  noteTypes: ['plain_text', 'img_text', 'link', ...AUDIO_NOTE_TYPES],
+  noteTypes: ['plain_text', 'img_text', 'link', 'audio', 'meeting', 'local_audio', 'internal_record', 'class_audio', 'recorder_audio', 'recorder_flash_audio'],
   downloadAttachments: true,
   syncInterval: 3600,
   debugMode: false,
@@ -20,19 +19,6 @@ export const DEFAULT_SETTINGS: GetBridgeSettings = {
 };
 
 interface TabDef { id: string; label: string; icon: string; }
-
-const NOTE_TYPE_LABELS: Record<NoteType, string> = {
-  plain_text: '文字笔记',
-  img_text: '图片笔记',
-  link: '链接笔记',
-  audio: '录音笔记',
-  meeting: '会议记录',
-  local_audio: '本地录音',
-  internal_record: '内录',
-  class_audio: '课堂录音',
-  recorder_audio: '录音机',
-  recorder_flash_audio: '闪记录音',
-};
 
 function formatQuotaMessage(quota: QuotaInfo): string {
   const read = quota.read;
@@ -315,38 +301,6 @@ export class GetBridgeSettingTab extends PluginSettingTab {
             this.plugin.setupAutoSync();
           })
       );
-
-    // Note types card
-    const typeCard = container.createDiv({ cls: 'flomo-settings-card' });
-    new Setting(typeCard).setName('同步笔记类型').setHeading();
-    typeCard.createDiv({ cls: 'getnote-notetype-desc', text: '选择需要同步的笔记类型' });
-
-    const typeGrid = typeCard.createDiv({ cls: 'getnote-notetype-grid' });
-    const allTypes: NoteType[] = ['plain_text', 'img_text', 'link', ...AUDIO_NOTE_TYPES];
-    for (const type of allTypes) {
-      const item = typeGrid.createDiv({ cls: 'getnote-notetype-item' });
-      const enabled = this.plugin.settings.noteTypes.includes(type);
-      item.addClass(enabled ? 'is-enabled' : 'is-disabled');
-
-      const label = item.createSpan({ cls: 'getnote-notetype-label', text: NOTE_TYPE_LABELS[type] });
-      const toggle = item.createEl('input', { type: 'checkbox' } as never) as HTMLInputElement;
-      toggle.checked = enabled;
-      toggle.addEventListener('change', async () => {
-        const types = new Set(this.plugin.settings.noteTypes);
-        if (toggle.checked) {
-          types.add(type);
-          item.removeClass('is-disabled');
-          item.addClass('is-enabled');
-        } else {
-          types.delete(type);
-          item.removeClass('is-enabled');
-          item.addClass('is-disabled');
-        }
-        this.plugin.settings.noteTypes = Array.from(types) as NoteType[];
-        await this.plugin.saveSettings();
-      });
-      void label; // used in DOM
-    }
 
     // Dev options
     const devCard = container.createDiv({ cls: 'flomo-settings-card' });

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PLUGIN_ID="getnote-bridge"
-VAULT_PLUGIN_DIR="$HOME/Documents/giraffetree/project/code/ideas/thinking-flomo/.obsidian/plugins/$PLUGIN_ID"
+VAULT_PLUGIN_DIR="$HOME/Documents/giraffetree/project/code/ideas/obsidian-plugin-test/.obsidian/plugins/$PLUGIN_ID"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

@@ -70,15 +70,18 @@ export class SyncEngine {
       cursor = page.cursor;
 
       for (const note of page.notes) {
-        if (!this.settings.noteTypes.includes(note.note_type)) continue;
-
         stats.total++;
         processedCount++;
 
         try {
           const result = await this.processNote(note, noteIndex);
           stats[result]++;
-        } catch {
+        } catch (e) {
+          // 限流退避耗尽：中断整次同步，让用户感知
+          if (e instanceof GetNoteApiError && e.rateLimited) {
+            this.emit({ status: 'error', message: e.message, error: e });
+            throw e;
+          }
           stats.failed++;
         }
 
@@ -111,7 +114,9 @@ export class SyncEngine {
     if (needsDetail(note)) {
       try {
         detail = await this.client.getNoteDetail(note.note_id);
-      } catch {
+      } catch (e) {
+        // 退避耗尽的限流错误不要静默吞，向上抛中断同步
+        if (e instanceof GetNoteApiError && e.rateLimited) throw e;
         detail = { ...note, attachments: [], children_ids: [] };
       }
     } else {

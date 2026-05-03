@@ -3,6 +3,100 @@ import type { GetNote, GetNoteDetail, QuotaInfo, QuotaBucket } from './types';
 
 const BASE_URL = 'https://openapi.biji.com';
 
+// ─── 客户端节流 + 限流退避 + 观测日志 ──────────────────────────────────────
+// 1) 节流：连续两次请求至少间隔 500ms（≈ 2 QPS）
+// 2) 退避：触发 429/10202 后按 1s/2s/4s/8s/16s/32s 重试，6 次仍败抛错
+// 3) 配额耗尽（10203）不重试，立即返回让上层处理
+// 4) 日志：每次请求输出到控制台，附 10s/60s 滑动窗口请求数
+// ──────────────────────────────────────────────────────────────────────────
+
+const MIN_INTERVAL_MS = 500;
+const BACKOFF_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 32000];
+
+let _nextSlot = 0;
+
+function _sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+/** 预约下一个请求时隙：保证与上一次预约至少间隔 MIN_INTERVAL_MS */
+async function _throttleSlot(): Promise<void> {
+  const now = Date.now();
+  const wait = Math.max(0, _nextSlot - now);
+  _nextSlot = Math.max(now, _nextSlot) + MIN_INTERVAL_MS;
+  if (wait > 0) await _sleep(wait);
+}
+
+const _reqTimestamps: number[] = [];
+
+function _recordRequest(): void {
+  const now = Date.now();
+  _reqTimestamps.push(now);
+  const cutoff = now - 5 * 60_000;
+  while (_reqTimestamps.length && _reqTimestamps[0] < cutoff) _reqTimestamps.shift();
+}
+
+function _reqStats(): { req10s: number; req60s: number } {
+  const now = Date.now();
+  let req10s = 0, req60s = 0;
+  for (const t of _reqTimestamps) {
+    const age = now - t;
+    if (age <= 10_000) req10s++;
+    if (age <= 60_000) req60s++;
+  }
+  return { req10s, req60s };
+}
+
+function _hms(): string {
+  const d = new Date();
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+}
+
+function _rateHeaders(h?: Record<string, string>): Record<string, string> {
+  if (!h) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(h)) {
+    const lk = k.toLowerCase();
+    if (lk.startsWith('x-ratelimit') || lk.startsWith('x-quota') || lk === 'retry-after') {
+      out[lk] = v;
+    }
+  }
+  return out;
+}
+
+function _logCall(
+  endpoint: string,
+  start: number,
+  status: number,
+  body: { success?: boolean; error?: { code?: number; reason?: string; message?: string; rate_limit?: unknown } } | null,
+  headers?: Record<string, string>
+): void {
+  const { req10s, req60s } = _reqStats();
+  const elapsed = Date.now() - start;
+  const err = body?.error;
+  const isRateLimited = status === 429 || err?.code === 10202 || err?.code === 10203;
+  const isError = (body !== null && body.success === false) || status >= 400 || status === 0;
+  const tag = isRateLimited ? 'RATE-LIMITED' : isError ? 'error' : 'ok';
+  const fn = (isRateLimited || isError) ? console.warn : console.log;
+
+  const errPart = err
+    ? ` code=${err.code ?? '-'} reason=${err.reason ?? '-'}${err.message ? ` msg="${err.message}"` : ''}`
+    : '';
+
+  const rh = _rateHeaders(headers);
+  const extras: Record<string, unknown> = {};
+  if (Object.keys(rh).length) extras.headers = rh;
+  if (err?.rate_limit) extras.rate_limit = err.rate_limit;
+
+  const line = `[GetNote ${_hms()}] ${endpoint} ${tag} status=${status} ${elapsed}ms req10s=${req10s} req60s=${req60s}${errPart}`;
+  if (Object.keys(extras).length) {
+    fn(line, extras);
+  } else {
+    fn(line);
+  }
+}
+
 export class GetNoteApiError extends Error {
   constructor(
     message: string,
@@ -53,6 +147,74 @@ function parseQuota(data: Record<string, unknown>): QuotaInfo {
   return { read: pickGroup(root.read), write: pickGroup(root.write) };
 }
 
+/**
+ * 统一请求入口：节流 + 429/10202 指数退避 + 日志。
+ * - 退避全部失败时抛 GetNoteApiError(rateLimited=true)
+ * - 网络/解析错误抛 GetNoteApiError，不重试
+ * - 其他响应（含 10203 配额耗尽 / 业务错误）原样返回，由调用方判断
+ */
+async function _doRequest(
+  endpoint: string,
+  url: string,
+  headers: Record<string, string>
+): Promise<{ status: number; body: any }> {
+  let lastStatus = 0;
+  let lastError: { code?: number; message?: string; reason?: string } | undefined;
+
+  for (let attempt = 0; attempt <= BACKOFF_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      const delay = BACKOFF_DELAYS_MS[attempt - 1];
+      console.warn(
+        `[GetNote ${_hms()}] ${endpoint} 限流退避: ${delay / 1000}s 后重试 (第 ${attempt}/${BACKOFF_DELAYS_MS.length} 次)`
+      );
+      await _sleep(delay);
+    }
+
+    await _throttleSlot();
+    _recordRequest();
+    const t0 = Date.now();
+
+    let resp: { status: number; text: string; headers: Record<string, string> };
+    try {
+      resp = await requestUrl({ url, method: 'GET', headers, throw: false });
+    } catch (e) {
+      _logCall(endpoint, t0, 0, null);
+      throw new GetNoteApiError(`请求失败: ${(e as Error).message}`);
+    }
+
+    let body: any;
+    try {
+      body = safeParseJson(resp.text);
+    } catch (e) {
+      _logCall(endpoint, t0, resp.status, null, resp.headers);
+      throw new GetNoteApiError(`响应解析失败: ${(e as Error).message}`, undefined, resp.status);
+    }
+
+    _logCall(endpoint, t0, resp.status, body, resp.headers);
+
+    lastStatus = resp.status;
+    lastError = body?.error;
+
+    const code = body?.error?.code;
+
+    // 配额耗尽（10203）：重试无用，原样返回让上层抛错
+    if (code === 10203) return { status: resp.status, body };
+
+    // QPS 限流（10202 或 HTTP 429）：进入下一轮退避
+    if (code === 10202 || resp.status === 429) continue;
+
+    return { status: resp.status, body };
+  }
+
+  const totalSec = BACKOFF_DELAYS_MS.reduce((a, b) => a + b, 0) / 1000;
+  throw new GetNoteApiError(
+    `请求频率超限，已退避重试 ${BACKOFF_DELAYS_MS.length} 次（累计等待 ${totalSec}s）仍失败：${lastError?.message ?? ''}`,
+    lastError?.code ?? 10202,
+    lastStatus || 429,
+    true
+  );
+}
+
 export class GetNoteClient {
   private apiKey: string;
   private clientId: string;
@@ -78,55 +240,40 @@ export class GetNoteClient {
     const cursorParam = cursor && cursor !== '0' ? encodeURIComponent(cursor) : '0';
     const url = `${BASE_URL}/open/api/v1/resource/note/list?cursor=${cursorParam}`;
 
-    try {
-      const resp = await requestUrl({ url, method: 'GET', headers: this.headers });
-      const body = safeParseJson(resp.text) as {
-        success: boolean;
-        data: { notes: GetNote[]; has_more: boolean; cursor: string };
-        error?: { code: number; message: string; reason?: string };
-      };
+    const { status, body } = await _doRequest('list', url, this.headers);
 
-      if (!body.success) {
-        const err = body.error;
-        if (resp.status === 429 || err?.code === 42900) {
-          throw new GetNoteApiError(err?.message || 'rate limited', err?.code, resp.status, true);
-        }
-        if (err?.code === 10001) {
-          throw new GetNoteApiError('凭证无效或已过期，请重新授权', err.code, 401);
-        }
-        throw new GetNoteApiError(err?.message || 'API 错误', err?.code, resp.status);
+    if (!body?.success) {
+      const err = body?.error;
+      if (status === 429 || err?.code === 10202 || err?.code === 10203 || err?.code === 42900) {
+        throw new GetNoteApiError(err?.message || 'rate limited', err?.code, status, true);
       }
-
-      return {
-        notes: body.data.notes || [],
-        hasMore: body.data.has_more,
-        cursor: body.data.cursor || '',
-      };
-    } catch (e) {
-      if (e instanceof GetNoteApiError) throw e;
-      throw new GetNoteApiError(`请求失败: ${(e as Error).message}`);
+      if (err?.code === 10001) {
+        throw new GetNoteApiError('凭证无效或已过期，请重新授权', err.code, 401);
+      }
+      throw new GetNoteApiError(err?.message || 'API 错误', err?.code, status);
     }
+
+    return {
+      notes: body.data.notes || [],
+      hasMore: body.data.has_more,
+      cursor: body.data.cursor || '',
+    };
   }
 
   /** 拉取笔记详情（录音转写、链接原文等富内容） */
   async getNoteDetail(noteId: string): Promise<GetNoteDetail> {
     const url = `${BASE_URL}/open/api/v1/resource/note/detail?id=${noteId}`;
-    try {
-      const resp = await requestUrl({ url, method: 'GET', headers: this.headers });
-      const body = safeParseJson(resp.text) as {
-        success: boolean;
-        data: { note: GetNoteDetail };
-        error?: { code: number; message: string };
-      };
 
-      if (!body.success) {
-        throw new GetNoteApiError(body.error?.message || 'API 错误', body.error?.code, resp.status);
+    const { status, body } = await _doRequest('detail', url, this.headers);
+
+    if (!body?.success) {
+      const err = body?.error;
+      if (status === 429 || err?.code === 10202 || err?.code === 10203) {
+        throw new GetNoteApiError(err?.message || 'rate limited', err?.code, status, true);
       }
-      return body.data.note;
-    } catch (e) {
-      if (e instanceof GetNoteApiError) throw e;
-      throw new GetNoteApiError(`请求详情失败: ${(e as Error).message}`);
+      throw new GetNoteApiError(err?.message || 'API 错误', err?.code, status);
     }
+    return body.data.note;
   }
 
   /** 验证凭证是否有效（拉取第一页，成功即通过） */
@@ -137,21 +284,13 @@ export class GetNoteClient {
   /** 查询当前配额（rate-limit/quota 接口） */
   async getQuota(): Promise<QuotaInfo> {
     const url = `${BASE_URL}/open/api/v1/resource/rate-limit/quota`;
-    try {
-      const resp = await requestUrl({ url, method: 'GET', headers: this.headers });
-      const body = safeParseJson(resp.text) as {
-        success: boolean;
-        data?: Record<string, unknown>;
-        error?: { code: number; message: string };
-      };
-      if (!body.success) {
-        throw new GetNoteApiError(body.error?.message || 'API 错误', body.error?.code, resp.status);
-      }
-      return parseQuota(body.data ?? {});
-    } catch (e) {
-      if (e instanceof GetNoteApiError) throw e;
-      throw new GetNoteApiError(`查询配额失败: ${(e as Error).message}`);
+
+    const { status, body } = await _doRequest('quota', url, this.headers);
+
+    if (!body?.success) {
+      throw new GetNoteApiError(body?.error?.message || 'API 错误', body?.error?.code, status);
     }
+    return parseQuota(body.data ?? {});
   }
 
   async downloadFile(url: string): Promise<ArrayBuffer | null> {
