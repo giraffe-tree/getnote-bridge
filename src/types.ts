@@ -79,6 +79,10 @@ export interface GetBridgeSettings {
   debugMode: boolean;
   cursor: string;              // 翻页游标，空串=首次
   lastSyncStats?: LastSyncStats;
+  // 知识库同步配置
+  knowledgeBaseDir: string;     // 知识库存储目录，默认 GetNotes/KnowledgeBase
+  selectedTopicIds: string[];   // 用户选择同步的个人知识库 ID 列表
+  selectedSubscribedTopicIds: string[]; // 用户选择同步的订阅知识库 ID 列表
 }
 
 export interface LastSyncStats {
@@ -123,4 +127,66 @@ export interface QuotaBucket {
 export interface QuotaInfo {
   read?: { daily?: QuotaBucket; monthly?: QuotaBucket };
   write?: { daily?: QuotaBucket; monthly?: QuotaBucket };
+}
+
+// ─── 知识库（Topic）类型 ────────────────────────────────────────────────────
+
+export interface KnowledgeTopic {
+  id: string;
+  name: string;
+  description?: string;
+  cover_url?: string;
+  scope?: string;
+  stats?: {
+    note_count: number;
+    file_count: number;
+    live_count: number;
+    blogger_count: number;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TopicResource {
+  resource_id: string;
+  resource_type: 'note' | 'post' | 'link' | 'file';
+  title: string;
+  content?: string;
+  directory_id?: string;
+  order_index: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TopicDirectory {
+  id: string;
+  name: string;
+  parent_id?: string;
+  order_index: number;
+}
+
+export interface TopicDetail extends KnowledgeTopic {
+  directories: TopicDirectory[];
+  resources: TopicResource[];
+}
+
+export interface TopicPost {
+  post_id: string;
+  title: string;
+  content: string;
+  excerpt?: string;
+  author?: string;
+  created_at: string;
+  updated_at: string;
+  attachments?: NoteAttachment[];
+}
+
+export interface TopicSyncStats {
+  created: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  total: number;
+  duration: number;
+  timestamp: number;
 }

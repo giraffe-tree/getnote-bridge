@@ -1,4 +1,4 @@
-import { PluginSettingTab, Setting, App, Notice, setIcon, normalizePath } from 'obsidian';
+import { PluginSettingTab, Setting, App, Notice, setIcon, normalizePath, ButtonComponent } from 'obsidian';
 import type GetBridgePlugin from '../main';
 import type { GetBridgeSettings, LastSyncStats, QuotaInfo } from './types';
 import { GetNoteClient, GetNoteApiError } from './getnoteClient';
@@ -16,6 +16,9 @@ export const DEFAULT_SETTINGS: GetBridgeSettings = {
   debugMode: false,
   cursor: '',
   lastSyncStats: undefined,
+  knowledgeBaseDir: 'GetNotes/KnowledgeBase',
+  selectedTopicIds: [],
+  selectedSubscribedTopicIds: [],
 };
 
 interface TabDef { id: string; label: string; icon: string; }
@@ -215,6 +218,14 @@ export class GetBridgeSettingTab extends PluginSettingTab {
 
     if (hasKey) {
       authSetting.addButton(btn =>
+        btn.setButtonText('查看 Key').onClick(() => {
+          console.log('[Get Bridge] API Key:', this.plugin.settings.apiKey);
+          console.log('[Get Bridge] Client ID:', this.plugin.settings.clientId);
+          new Notice('API Key 已打印到控制台，按 Cmd+Opt+I 打开开发者工具查看');
+        })
+      );
+
+      authSetting.addButton(btn =>
         btn.setButtonText('验证').onClick(async () => {
           btn.setButtonText('验证中...').setDisabled(true);
           try {
@@ -302,6 +313,176 @@ export class GetBridgeSettingTab extends PluginSettingTab {
           })
       );
 
+    // Knowledge base config card
+    const kbCard = container.createDiv({ cls: 'flomo-settings-card' });
+    new Setting(kbCard).setName('知识库同步').setHeading();
+
+    const kbDirSetting = new Setting(kbCard)
+      .setName('知识库存储目录')
+      .setDesc('相对于 Vault 根目录的路径，知识库内容将同步到此目录下的子文件夹中')
+      .addText(text =>
+        text
+          .setPlaceholder('GetNotes/KnowledgeBase')
+          .setValue(this.plugin.settings.knowledgeBaseDir)
+          .onChange(async value => {
+            this.plugin.settings.knowledgeBaseDir = value.trim() || 'GetNotes/KnowledgeBase';
+            await this.plugin.saveSettings();
+            this.updatePathDisplay(kbPathEl, this.plugin.settings.knowledgeBaseDir);
+          })
+      );
+
+    const kbPathContainer = kbDirSetting.descEl.createDiv({ cls: 'flomo-full-path-container' });
+    kbPathContainer.createSpan({ text: '完整路径: ', cls: 'flomo-full-path-label' });
+    const kbPathEl = kbPathContainer.createSpan({ cls: 'flomo-full-path-value' });
+    this.updatePathDisplay(kbPathEl, this.plugin.settings.knowledgeBaseDir);
+
+    // 个人知识库选择
+    const personalTopicSetting = new Setting(kbCard)
+      .setName('选择要同步的个人知识库')
+      .setDesc('勾选需要同步的知识库，取消勾选则跳过');
+
+    const topicListContainer = kbCard.createDiv({ cls: 'flomo-settings-card topic-list-container' });
+    topicListContainer.style.display = 'none';
+
+    let topicList: Array<{ id: string; name: string }> = [];
+
+    const renderTopicList = () => {
+      topicListContainer.empty();
+      if (topicList.length === 0) {
+        topicListContainer.createDiv({ text: '暂无个人知识库', cls: 'topic-list-empty' });
+        return;
+      }
+
+      for (const topic of topicList) {
+        const isSelected = this.plugin.settings.selectedTopicIds.includes(topic.id);
+        const row = topicListContainer.createDiv({ cls: 'topic-list-row' });
+
+        const checkbox = row.createEl('input', { type: 'checkbox' });
+        checkbox.checked = isSelected;
+        checkbox.addEventListener('change', async () => {
+          if (checkbox.checked) {
+            if (!this.plugin.settings.selectedTopicIds.includes(topic.id)) {
+              this.plugin.settings.selectedTopicIds.push(topic.id);
+            }
+          } else {
+            this.plugin.settings.selectedTopicIds = this.plugin.settings.selectedTopicIds.filter(id => id !== topic.id);
+          }
+          await this.plugin.saveSettings();
+        });
+
+        row.createSpan({ text: topic.name, cls: 'topic-list-name' });
+      }
+    };
+
+    const loadTopicList = async (btn?: ButtonComponent) => {
+      if (btn) { btn.setButtonText('加载中...').setDisabled(true); }
+      try {
+        const client = new GetNoteClient(this.plugin.settings.apiKey, this.plugin.settings.clientId);
+        topicList = await client.listTopics();
+        topicListContainer.style.display = 'block';
+        renderTopicList();
+      } catch (e) {
+        const msg = e instanceof GetNoteApiError ? e.message : (e as Error).message;
+        new Notice(`获取知识库列表失败: ${msg}`, 5000);
+      } finally {
+        if (btn) { btn.setButtonText('获取列表').setDisabled(false); }
+      }
+    };
+
+    personalTopicSetting.addButton(btn => {
+      btn.setButtonText('获取列表').onClick(() => loadTopicList(btn));
+    });
+
+    personalTopicSetting.addButton(btn => {
+      btn.setButtonText('同步数据').onClick(async () => {
+        btn.setButtonText('同步中...').setDisabled(true);
+        try { await this.plugin.performTopicSync(); }
+        finally {
+          btn.setButtonText('同步数据').setDisabled(false);
+          this.renderCurrentTab();
+        }
+      });
+    });
+
+    // 订阅知识库列表
+    const subscribedTopicSetting = new Setting(kbCard)
+      .setName('选择要同步的订阅知识库')
+      .setDesc('勾选需要同步的订阅知识库，取消勾选则跳过');
+
+    const subscribedTopicListContainer = kbCard.createDiv({ cls: 'flomo-settings-card topic-list-container' });
+    subscribedTopicListContainer.style.display = 'none';
+
+    let subscribedTopicList: Array<{ id: string; name: string }> = [];
+
+    const renderSubscribedTopicList = () => {
+      subscribedTopicListContainer.empty();
+      if (subscribedTopicList.length === 0) {
+        subscribedTopicListContainer.createDiv({ text: '暂无订阅知识库', cls: 'topic-list-empty' });
+        return;
+      }
+
+      for (const topic of subscribedTopicList) {
+        const isSelected = this.plugin.settings.selectedSubscribedTopicIds.includes(topic.id);
+        const row = subscribedTopicListContainer.createDiv({ cls: 'topic-list-row' });
+
+        const checkbox = row.createEl('input', { type: 'checkbox' });
+        checkbox.checked = isSelected;
+        checkbox.addEventListener('change', async () => {
+          if (checkbox.checked) {
+            if (!this.plugin.settings.selectedSubscribedTopicIds.includes(topic.id)) {
+              this.plugin.settings.selectedSubscribedTopicIds.push(topic.id);
+            }
+          } else {
+            this.plugin.settings.selectedSubscribedTopicIds = this.plugin.settings.selectedSubscribedTopicIds.filter(id => id !== topic.id);
+          }
+          await this.plugin.saveSettings();
+        });
+
+        row.createSpan({ text: topic.name, cls: 'topic-list-name' });
+      }
+    };
+
+    const loadSubscribedTopicList = async (btn?: ButtonComponent) => {
+      if (btn) { btn.setButtonText('加载中...').setDisabled(true); }
+      try {
+        const client = new GetNoteClient(this.plugin.settings.apiKey, this.plugin.settings.clientId);
+        subscribedTopicList = await client.listSubscribedTopics();
+        subscribedTopicListContainer.style.display = 'block';
+        renderSubscribedTopicList();
+      } catch (e) {
+        const msg = e instanceof GetNoteApiError ? e.message : (e as Error).message;
+        new Notice(`获取订阅知识库列表失败: ${msg}`, 5000);
+      } finally {
+        if (btn) { btn.setButtonText('获取列表').setDisabled(false); }
+      }
+    };
+
+    subscribedTopicSetting.addButton(btn => {
+      btn.setButtonText('获取列表').onClick(() => loadSubscribedTopicList(btn));
+    });
+
+    subscribedTopicSetting.addButton(btn => {
+      btn.setButtonText('同步数据').onClick(async () => {
+        btn.setButtonText('同步中...').setDisabled(true);
+        try { await this.plugin.performTopicSync(); }
+        finally {
+          btn.setButtonText('同步数据').setDisabled(false);
+          this.renderCurrentTab();
+        }
+      });
+    });
+
+    // 进入配置界面时自动获取列表（已授权）
+    if (this.plugin.settings.apiKey) {
+      topicListContainer.style.display = 'block';
+      void loadTopicList();
+      void loadSubscribedTopicList();
+    } else if (this.plugin.settings.selectedTopicIds.length > 0 || this.plugin.settings.selectedSubscribedTopicIds.length > 0) {
+      topicListContainer.style.display = 'block';
+      void loadTopicList();
+      void loadSubscribedTopicList();
+    }
+
     // Dev options
     const devCard = container.createDiv({ cls: 'flomo-settings-card' });
     new Setting(devCard).setName('开发者选项').setHeading();
@@ -354,6 +535,32 @@ export class GetBridgeSettingTab extends PluginSettingTab {
             try { await this.plugin.performFullSync(); }
             finally {
               btn.setButtonText('全量同步').setDisabled(false);
+              this.renderCurrentTab();
+            }
+          })
+      );
+
+    // Knowledge base sync card
+    const kbSyncCard = container.createDiv({ cls: 'flomo-settings-card' });
+    new Setting(kbSyncCard).setName('知识库同步').setHeading();
+
+    const selectedCount = this.plugin.settings.selectedTopicIds.length;
+    new Setting(kbSyncCard)
+      .setName('同步选中的知识库')
+      .setDesc(selectedCount > 0
+        ? `已选择 ${selectedCount} 个知识库，将同步到 ${this.plugin.settings.knowledgeBaseDir}/`
+        : '请先在「配置」Tab 中选择要同步的知识库')
+      .addButton(btn =>
+        btn
+          .setButtonText(this.plugin.isSyncing ? '同步中...' : '同步知识库')
+          .setCta()
+          .setDisabled(this.plugin.isSyncing || selectedCount === 0)
+          .onClick(async () => {
+            btn.setButtonText('同步中...').setDisabled(true);
+            try {
+              await this.plugin.performTopicSync();
+            } finally {
+              btn.setButtonText('同步知识库').setDisabled(false);
               this.renderCurrentTab();
             }
           })

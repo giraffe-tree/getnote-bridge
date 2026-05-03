@@ -563,3 +563,49 @@
   border-radius: 6px;
   font-size: 13px;
 }
+
+/* ===== Knowledge Base Topic List ===== */
+.topic-list-container {
+  margin-top: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.topic-list-empty {
+  font-size: 13px;
+  color: var(--text-faint);
+  text-align: center;
+  padding: 16px 0;
+}
+
+.topic-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+
+.topic-list-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.topic-list-row input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.topic-list-name {
+  font-size: 13px;
+  color: var(--text-normal);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

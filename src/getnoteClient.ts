@@ -1,5 +1,5 @@
 import { requestUrl } from 'obsidian';
-import type { GetNote, GetNoteDetail, QuotaInfo, QuotaBucket } from './types';
+import type { GetNote, GetNoteDetail, QuotaInfo, QuotaBucket, KnowledgeTopic, TopicPost } from './types';
 
 const BASE_URL = 'https://openapi.biji.com';
 
@@ -300,5 +300,156 @@ export class GetNoteClient {
     } catch {
       return null;
     }
+  }
+
+  // ─── 知识库（Topic）API ────────────────────────────────────────────────────
+
+  /** 列出用户的个人知识库 */
+  async listTopics(): Promise<KnowledgeTopic[]> {
+    return this._fetchTopicList('topic-list', '');
+  }
+
+  /** 列出用户订阅的知识库 */
+  async listSubscribedTopics(page = 1): Promise<KnowledgeTopic[]> {
+    const url = `${BASE_URL}/open/api/v1/resource/knowledge/subscribe/list?page=${page}`;
+    const { status, body } = await _doRequest('subscribed-topic-list', url, this.headers);
+
+    if (!body?.success) {
+      const err = body?.error;
+      if (err?.code === 10001) {
+        throw new GetNoteApiError('凭证无效或已过期，请重新授权', err.code, 401);
+      }
+      throw new GetNoteApiError(err?.message || '获取订阅知识库列表失败', err?.code, status);
+    }
+
+    const topics: KnowledgeTopic[] = [];
+    const rawList = body.data?.topics ?? body.data?.list ?? body.data ?? [];
+    for (const item of rawList) {
+      if (!item) continue;
+      topics.push({
+        id: String(item.id ?? item.topic_id ?? ''),
+        name: String(item.name ?? item.title ?? '未命名知识库'),
+        description: item.description,
+        cover_url: item.cover_url ?? item.cover,
+        scope: item.scope,
+        stats: item.stats,
+        created_at: item.created_at ?? '',
+        updated_at: item.updated_at ?? '',
+      });
+    }
+
+    // 递归翻页
+    if (body.data?.has_more) {
+      const next = await this.listSubscribedTopics(page + 1);
+      topics.push(...next);
+    }
+
+    return topics;
+  }
+
+  private async _fetchTopicList(endpoint: string, query: string): Promise<KnowledgeTopic[]> {
+    const url = `${BASE_URL}/open/api/v1/resource/topic/list${query}`;
+    const { status, body } = await _doRequest(endpoint, url, this.headers);
+
+    if (!body?.success) {
+      const err = body?.error;
+      if (err?.code === 10001) {
+        throw new GetNoteApiError('凭证无效或已过期，请重新授权', err.code, 401);
+      }
+      throw new GetNoteApiError(err?.message || '获取知识库列表失败', err?.code, status);
+    }
+
+    const topics: KnowledgeTopic[] = [];
+    const rawList = body.data?.topics ?? body.data?.list ?? body.data ?? [];
+    for (const item of rawList) {
+      if (!item) continue;
+      topics.push({
+        id: String(item.id ?? item.topic_id ?? ''),
+        name: String(item.name ?? item.title ?? '未命名知识库'),
+        description: item.description,
+        cover_url: item.cover_url ?? item.cover,
+        scope: item.scope,
+        stats: item.stats,
+        created_at: item.created_at ?? '',
+        updated_at: item.updated_at ?? '',
+      });
+    }
+    return topics;
+  }
+
+  /** 获取知识库内资源列表（笔记+帖子混合） */
+  async listTopicResources(topicId: string): Promise<{
+    resources: Array<{
+      resource_id: string;
+      resource_type: string;
+      title: string;
+      created_at: string;
+      updated_at: string;
+      note_id?: string;
+      post_id?: string;
+    }>;
+    hasMore: boolean;
+    cursor: string;
+  }> {
+    const cursorParam = '';
+    const url = `${BASE_URL}/open/api/v1/topic/resource/list?topic_id=${topicId}&cursor=${cursorParam}`;
+
+    const { status, body } = await _doRequest('topic-resources', url, this.headers);
+
+    if (!body?.success) {
+      const err = body?.error;
+      if (err?.code === 10001) {
+        throw new GetNoteApiError('凭证无效或已过期，请重新授权', err.code, 401);
+      }
+      throw new GetNoteApiError(err?.message || '获取知识库资源失败', err?.code, status);
+    }
+
+    const rawList = body.data?.resources ?? body.data?.list ?? body.data ?? [];
+    const resources = [];
+    for (const item of rawList) {
+      if (!item) continue;
+      resources.push({
+        resource_id: String(item.id ?? item.resource_id ?? ''),
+        resource_type: String(item.type ?? item.resource_type ?? 'note'),
+        title: String(item.title ?? ''),
+        created_at: item.created_at ?? '',
+        updated_at: item.updated_at ?? '',
+        note_id: item.note_id ? String(item.note_id) : undefined,
+        post_id: item.post_id ? String(item.post_id) : undefined,
+      });
+    }
+
+    return {
+      resources,
+      hasMore: body.data?.has_more ?? false,
+      cursor: body.data?.cursor ?? '',
+    };
+  }
+
+  /** 获取帖子详情 */
+  async getPostDetail(postId: string): Promise<TopicPost> {
+    const url = `${BASE_URL}/open/api/v1/topic/post/detail?id=${postId}`;
+
+    const { status, body } = await _doRequest('post-detail', url, this.headers);
+
+    if (!body?.success) {
+      const err = body?.error;
+      if (err?.code === 10001) {
+        throw new GetNoteApiError('凭证无效或已过期，请重新授权', err.code, 401);
+      }
+      throw new GetNoteApiError(err?.message || '获取帖子详情失败', err?.code, status);
+    }
+
+    const post = body.data?.post ?? body.data ?? {};
+    return {
+      post_id: String(post.id ?? post.post_id ?? postId),
+      title: String(post.title ?? ''),
+      content: String(post.content ?? post.body ?? ''),
+      excerpt: post.excerpt,
+      author: post.author?.name ?? post.author_name,
+      created_at: post.created_at ?? '',
+      updated_at: post.updated_at ?? '',
+      attachments: post.attachments ?? [],
+    };
   }
 }

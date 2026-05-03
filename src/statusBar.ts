@@ -131,6 +131,7 @@ export class StatusBarManager {
     const menu = new Menu();
     menu.addItem(item => item.setTitle('立即同步').setIcon('sync').onClick(() => void this.plugin.performSync()));
     menu.addItem(item => item.setTitle('全量同步').setIcon('refresh-cw').onClick(() => void this.plugin.performFullSync()));
+    menu.addItem(item => item.setTitle('同步知识库').setIcon('book-open').onClick(() => void this.plugin.performTopicSync()));
     menu.addSeparator();
     menu.addItem(item => item.setTitle('打开设置').setIcon('settings').onClick(() => this.plugin.openSettings()));
     menu.showAtMouseEvent(e);

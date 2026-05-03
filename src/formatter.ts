@@ -1,4 +1,4 @@
-import type { GetNote, GetNoteDetail, NoteType } from './types';
+import type { GetNote, GetNoteDetail, NoteType, TopicPost } from './types';
 import { AUDIO_NOTE_TYPES } from './types';
 
 /** 需要单独拉取详情的笔记类型（列表接口不含转写/原文） */
@@ -34,17 +34,26 @@ function buildFrontmatter(note: GetNoteDetail): string {
     ? `tags:\n${tagNames.map(t => `  - "${escapeYaml(t)}"`).join('\n')}`
     : 'tags: []';
 
-  return [
+  const topicNames = note.topics?.map(t => t.name) ?? [];
+  const topicsYaml = topicNames.length > 0
+    ? `topics:\n${topicNames.map(t => `  - "${escapeYaml(t)}"`).join('\n')}`
+    : '';
+
+  const lines = [
     '---',
     `note_id: "${note.note_id}"`,
     `note_type: ${note.note_type}`,
     `title: "${escapeYaml(note.title || '')}"`,
     tagsYaml,
+  ];
+  if (topicsYaml) lines.push(topicsYaml);
+  lines.push(
     `created_at: "${note.created_at}"`,
     `updated_at: "${note.updated_at}"`,
     `source: "${note.source || ''}"`,
     '---',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 function buildBody(note: GetNoteDetail): string {
@@ -172,3 +181,55 @@ export function attachmentFilenameFromUrl(url: string, fallback: string): string
 
 export { AUDIO_NOTE_TYPES };
 export type { NoteType };
+
+// ─── 知识库帖子格式化 ────────────────────────────────────────────────────────
+
+/** 将帖子转换为 Markdown（frontmatter + 正文） */
+export function postToMarkdown(post: TopicPost): string {
+  return `${buildPostFrontmatter(post)}\n${post.content || ''}`;
+}
+
+function buildPostFrontmatter(post: TopicPost): string {
+  return [
+    '---',
+    `post_id: "${post.post_id}"`,
+    `title: "${escapeYaml(post.title || '')}"`,
+    `author: "${escapeYaml(post.author || '')}"`,
+    `created_at: "${post.created_at}"`,
+    `updated_at: "${post.updated_at}"`,
+    '---',
+  ].join('\n');
+}
+
+/** 生成知识库索引文件内容 */
+export function topicIndexMarkdown(
+  topic: { id: string; name: string; description?: string; updated_at?: string },
+  resources: Array<{ resource_id: string; resource_type: string; title: string }>
+): string {
+  const lines: string[] = [
+    '---',
+    `topic_id: "${topic.id}"`,
+    `name: "${escapeYaml(topic.name)}"`,
+    `updated_at: "${topic.updated_at || ''}"`,
+    '---',
+    '',
+    `# ${topic.name}`,
+    '',
+  ];
+
+  if (topic.description) {
+    lines.push(topic.description, '');
+  }
+
+  lines.push('## 目录', '');
+
+  for (const res of resources) {
+    const filename = res.title
+      ? slugify(res.title, 30)
+      : res.resource_id;
+    lines.push(`- [[${filename}_${res.resource_id}|${res.title || '未命名'}]]`);
+  }
+
+  lines.push('');
+  return lines.join('\n');
+}
