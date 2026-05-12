@@ -1,9 +1,19 @@
-import { PluginSettingTab, Setting, App, Notice, setIcon, normalizePath, ButtonComponent } from 'obsidian';
+import { PluginSettingTab, Setting, App, Notice, setIcon, normalizePath, ButtonComponent, TFolder, TFile } from 'obsidian';
 import type GetBridgePlugin from '../main';
-import type { GetBridgeSettings, LastSyncStats, QuotaInfo } from './types';
+import type { GetBridgeSettings, LastSyncStats, NoteType, QuotaInfo } from './types';
+import { AUDIO_NOTE_TYPES } from './types';
 import { GetNoteClient, GetNoteApiError } from './getnoteClient';
 import { OAuthFlow } from './oauthFlow';
 import { getTooltipManager } from './tooltip';
+
+interface LatestNoteInfo {
+  title: string;
+  noteType: NoteType | '';
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  preview: string;
+}
 
 export const DEFAULT_SETTINGS: GetBridgeSettings = {
   apiKey: '',
@@ -156,30 +166,209 @@ export class GetBridgeSettingTab extends PluginSettingTab {
       : '从未同步';
     lastSyncCard.createDiv({ cls: 'flomo-status-card-value', text: lastSyncText });
 
-    // Last sync stats
-    if (lastStats) {
-      const statsCard = container.createDiv({ cls: 'flomo-settings-card' });
-      new Setting(statsCard).setName('上次同步统计').setHeading();
-      const grid = statsCard.createDiv({ cls: 'flomo-stats-grid-detailed' });
-
-      const items: Array<{ label: string; value: number; cls: string }> = [
-        { label: '新增', value: lastStats.created, cls: 'created' },
-        { label: '更新', value: lastStats.updated, cls: 'updated' },
-        { label: '跳过', value: lastStats.skipped, cls: 'skipped' },
-        { label: '失败', value: lastStats.failed,  cls: 'failed'  },
-      ];
-      for (const item of items) {
-        const c = grid.createDiv({ cls: `flomo-stats-card ${item.cls}` });
-        c.createDiv({ cls: 'flomo-stats-card-value', text: String(item.value) });
-        c.createDiv({ cls: 'flomo-stats-card-label', text: item.label });
-      }
-      statsCard.createDiv({
-        cls: 'flomo-stats-footer',
-        text: `总计: ${lastStats.total} 条 | 耗时: ${lastStats.duration}秒 | ${new Date(lastStats.timestamp).toLocaleString('zh-CN')}`,
-      });
-    }
+    // Latest update details (sync time + latest local note preview)
+    this.renderLatestUpdateCard(container, lastStats);
 
     this.renderHeatmap(container);
+  }
+
+  // ─── Latest update card ──────────────────────────────────────────────────────
+
+  private renderLatestUpdateCard(container: HTMLElement, lastStats: LastSyncStats | undefined): void {
+    const card = container.createDiv({ cls: 'flomo-settings-card flomo-latest-card' });
+    new Setting(card).setName('最近更新详情').setHeading();
+
+    // Sync time row
+    const timeRow = card.createDiv({ cls: 'flomo-latest-sync' });
+    const iconWrap = timeRow.createSpan({ cls: 'flomo-latest-sync-icon' });
+    setIcon(iconWrap, 'refresh-cw');
+    const textWrap = timeRow.createDiv({ cls: 'flomo-latest-sync-text' });
+    textWrap.createSpan({ cls: 'flomo-latest-sync-label', text: '同步时间' });
+    if (lastStats?.timestamp) {
+      const ts = lastStats.timestamp;
+      textWrap.createSpan({
+        cls: 'flomo-latest-sync-value',
+        text: this.relativeTime(Math.floor(ts / 1000)),
+      });
+      textWrap.createSpan({
+        cls: 'flomo-latest-sync-meta',
+        text: new Date(ts).toLocaleString('zh-CN'),
+      });
+    } else {
+      textWrap.createSpan({ cls: 'flomo-latest-sync-value', text: '从未同步' });
+    }
+
+    // Latest note slot (rendered async)
+    const noteSlot = card.createDiv({ cls: 'flomo-latest-note-slot' });
+    const placeholder = noteSlot.createDiv({ cls: 'flomo-latest-note-empty', text: '加载中…' });
+
+    const file = this.findLatestNoteFile();
+    if (!file) {
+      placeholder.setText('暂无本地笔记');
+      return;
+    }
+
+    void this.fillLatestNote(noteSlot, file);
+  }
+
+  private async fillLatestNote(slot: HTMLElement, file: TFile): Promise<void> {
+    let content: string;
+    try {
+      content = await this.app.vault.cachedRead(file);
+    } catch {
+      slot.empty();
+      slot.createDiv({ cls: 'flomo-latest-note-empty', text: '读取笔记失败' });
+      return;
+    }
+    // 容器可能已被 renderCurrentTab 替换，渲染前先确认还挂在文档中
+    if (!slot.isConnected) return;
+
+    const info = this.parseLatestNoteInfo(content);
+    slot.empty();
+    this.renderLatestNoteCard(slot, file, info);
+  }
+
+  private renderLatestNoteCard(slot: HTMLElement, file: TFile, info: LatestNoteInfo): void {
+    const note = slot.createDiv({ cls: 'flomo-latest-note' });
+    note.setAttr('role', 'link');
+    note.setAttr('tabindex', '0');
+    note.setAttr('aria-label', `打开笔记 ${info.title || file.basename}`);
+
+    const open = () => this.app.workspace.openLinkText(file.path, '', false);
+    note.addEventListener('click', open);
+    note.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void open(); }
+    });
+
+    // Header: type icon + title
+    const header = note.createDiv({ cls: 'flomo-latest-note-header' });
+    const typeIcon = header.createSpan({ cls: 'flomo-latest-note-type-icon' });
+    setIcon(typeIcon, this.noteTypeIcon(info.noteType));
+    header.createDiv({
+      cls: 'flomo-latest-note-title',
+      text: info.title || file.basename,
+    });
+
+    // Meta row: type label · tags · time
+    const meta = note.createDiv({ cls: 'flomo-latest-note-meta' });
+    const typeLabel = this.noteTypeLabel(info.noteType);
+    if (typeLabel) {
+      meta.createSpan({ cls: 'flomo-latest-note-type', text: typeLabel });
+    }
+    if (info.tags.length) {
+      const tagWrap = meta.createSpan({ cls: 'flomo-latest-note-tags' });
+      for (const t of info.tags.slice(0, 5)) {
+        tagWrap.createSpan({ cls: 'flomo-latest-note-tag', text: `#${t}` });
+      }
+      if (info.tags.length > 5) {
+        tagWrap.createSpan({ cls: 'flomo-latest-note-tag-more', text: `+${info.tags.length - 5}` });
+      }
+    }
+    const timeText = info.createdAt || info.updatedAt;
+    if (timeText) {
+      meta.createSpan({ cls: 'flomo-latest-note-time', text: this.shortNoteTime(timeText) });
+    }
+
+    // Preview body
+    if (info.preview) {
+      note.createDiv({ cls: 'flomo-latest-note-preview', text: info.preview });
+    } else {
+      note.createDiv({ cls: 'flomo-latest-note-preview empty', text: '（无正文预览）' });
+    }
+
+    // Footer hint
+    const footer = note.createDiv({ cls: 'flomo-latest-note-footer' });
+    const arrow = footer.createSpan({ cls: 'flomo-latest-note-arrow' });
+    setIcon(arrow, 'arrow-right');
+    footer.createSpan({ text: '点击打开' });
+  }
+
+  private findLatestNoteFile(): TFile | null {
+    const dir = normalizePath(this.plugin.settings.targetDir);
+    const files = this.app.vault.getMarkdownFiles().filter(f =>
+      (f.path.startsWith(dir + '/') || f.path === dir) && !f.path.includes('/attachments/')
+    );
+    if (!files.length) return null;
+    let latest = files[0];
+    for (const f of files) if (f.stat.mtime > latest.stat.mtime) latest = f;
+    return latest;
+  }
+
+  private parseLatestNoteInfo(content: string): LatestNoteInfo {
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n?/);
+    const fm = fmMatch ? fmMatch[1] : '';
+    const body = fmMatch ? content.slice(fmMatch[0].length) : content;
+    return {
+      title: this.fmString(fm, 'title'),
+      noteType: this.fmString(fm, 'note_type') as NoteType | '',
+      tags: this.fmList(fm, 'tags'),
+      createdAt: this.fmString(fm, 'created_at'),
+      updatedAt: this.fmString(fm, 'updated_at'),
+      preview: this.makePreview(body, 160),
+    };
+  }
+
+  private fmString(fm: string, key: string): string {
+    const m = fm.match(new RegExp(`^${key}:\\s*"?([^"\\n]*)"?\\s*$`, 'm'));
+    return m ? m[1].trim() : '';
+  }
+
+  private fmList(fm: string, key: string): string[] {
+    const re = new RegExp(`^${key}:\\s*((?:\\[[^\\]]*\\])?)\\s*\\n((?:\\s+-\\s+.*\\n?)*)`, 'm');
+    const m = fm.match(re);
+    if (!m) return [];
+    if (m[1].trim() === '[]') return [];
+    return (m[2] || '')
+      .split('\n')
+      .map(l => l.replace(/^\s+-\s+/, '').trim())
+      .map(s => s.replace(/^"|"$/g, ''))
+      .filter(Boolean);
+  }
+
+  private makePreview(body: string, maxLen: number): string {
+    const text = body
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')   // images
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // links → text
+      .replace(/^#{1,6}\s+/gm, '')             // heading marks
+      .replace(/^\s*>\s?/gm, '')                // blockquote marks
+      .replace(/^\s*-{3,}\s*$/gm, '')          // hr
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) return '';
+    return text.length > maxLen ? text.slice(0, maxLen) + '…' : text;
+  }
+
+  private shortNoteTime(s: string): string {
+    // s 形如 "YYYY-MM-DD HH:MM:SS"，只展示前 16 位（精确到分钟）
+    return s.length >= 16 ? s.slice(0, 16) : s;
+  }
+
+  private noteTypeIcon(type: string): string {
+    if (AUDIO_NOTE_TYPES.includes(type as NoteType)) return 'mic';
+    switch (type) {
+      case 'link':     return 'link';
+      case 'img_text': return 'image';
+      case 'plain_text': return 'file-text';
+      default:         return 'file-text';
+    }
+  }
+
+  private noteTypeLabel(type: string): string {
+    switch (type) {
+      case 'plain_text':         return '文本';
+      case 'img_text':           return '图文';
+      case 'link':               return '链接';
+      case 'audio':              return '录音';
+      case 'meeting':            return '会议';
+      case 'local_audio':        return '本地音频';
+      case 'internal_record':    return '内录';
+      case 'class_audio':        return '课堂录音';
+      case 'recorder_audio':     return '录音笔';
+      case 'recorder_flash_audio': return '录音笔闪存';
+      default:                   return '';
+    }
   }
 
   // ─── Config ──────────────────────────────────────────────────────────────────
