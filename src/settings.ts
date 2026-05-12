@@ -415,7 +415,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
     personalTopicSetting.addButton(btn => {
       btn.setButtonText('同步数据').onClick(async () => {
         btn.setButtonText('同步中...').setDisabled(true);
-        try { await this.plugin.performTopicSync(); }
+        try { await this.plugin.performTopicSync('personal'); }
         finally {
           btn.setButtonText('同步数据').setDisabled(false);
           this.renderCurrentTab();
@@ -483,7 +483,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
     subscribedTopicSetting.addButton(btn => {
       btn.setButtonText('同步数据').onClick(async () => {
         btn.setButtonText('同步中...').setDisabled(true);
-        try { await this.plugin.performTopicSync(); }
+        try { await this.plugin.performTopicSync('subscribed'); }
         finally {
           btn.setButtonText('同步数据').setDisabled(false);
           this.renderCurrentTab();
@@ -563,17 +563,21 @@ export class GetBridgeSettingTab extends PluginSettingTab {
     const kbSyncCard = container.createDiv({ cls: 'flomo-settings-card' });
     new Setting(kbSyncCard).setName('知识库同步').setHeading();
 
-    const selectedCount = this.plugin.settings.selectedTopicIds.length;
+    const personalCount = this.plugin.settings.selectedTopicIds.length;
+    const subscribedCount = this.plugin.settings.selectedSubscribedTopicIds.length;
+    const totalCount = personalCount + subscribedCount;
+    const desc = totalCount > 0
+      ? `已选择 ${personalCount} 个个人知识库 + ${subscribedCount} 个订阅知识库，将同步到 ${this.plugin.settings.knowledgeBaseDir}/`
+      : '请先在「配置」Tab 中选择要同步的知识库';
+
     new Setting(kbSyncCard)
       .setName('同步选中的知识库')
-      .setDesc(selectedCount > 0
-        ? `已选择 ${selectedCount} 个知识库，将同步到 ${this.plugin.settings.knowledgeBaseDir}/`
-        : '请先在「配置」Tab 中选择要同步的知识库')
+      .setDesc(desc)
       .addButton(btn =>
         btn
           .setButtonText(this.plugin.isSyncing ? '同步中...' : '同步知识库')
           .setCta()
-          .setDisabled(this.plugin.isSyncing || selectedCount === 0)
+          .setDisabled(this.plugin.isSyncing || totalCount === 0)
           .onClick(async () => {
             btn.setButtonText('同步中...').setDisabled(true);
             try {

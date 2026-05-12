@@ -98,15 +98,22 @@ export default class GetBridgePlugin extends Plugin {
     await this.runSync(true);
   }
 
-  async performTopicSync(): Promise<void> {
+  async performTopicSync(scope: 'all' | 'personal' | 'subscribed' = 'all'): Promise<void> {
     if (this.isSyncing) { new Notice('同步进行中...'); return; }
     if (!this.settings.apiKey) {
       new Notice('请先在设置中完成授权', 5000);
       this.openSettings();
       return;
     }
-    if (this.settings.selectedTopicIds.length === 0) {
-      new Notice('请先在设置中选择要同步的知识库', 5000);
+
+    const personalIds = scope === 'subscribed' ? [] : this.settings.selectedTopicIds;
+    const subscribedIds = scope === 'personal' ? [] : this.settings.selectedSubscribedTopicIds;
+    if (personalIds.length === 0 && subscribedIds.length === 0) {
+      const msg =
+        scope === 'personal' ? '请先选择要同步的个人知识库' :
+        scope === 'subscribed' ? '请先选择要同步的订阅知识库' :
+        '请先在设置中选择要同步的知识库';
+      new Notice(msg, 5000);
       this.openSettings();
       return;
     }
@@ -124,10 +131,7 @@ export default class GetBridgePlugin extends Plugin {
         }
       });
 
-      const stats = await engine.syncTopics(
-        this.settings.selectedTopicIds,
-        this.settings.selectedSubscribedTopicIds
-      );
+      const stats = await engine.syncTopics(personalIds, subscribedIds);
       this.statusBar.setIdle(stats.timestamp);
       this.settingsTab?.refresh();
 
@@ -135,7 +139,11 @@ export default class GetBridgePlugin extends Plugin {
       if (stats.created) parts.push(`新增 ${stats.created}`);
       if (stats.updated) parts.push(`更新 ${stats.updated}`);
       if (stats.failed)  parts.push(`失败 ${stats.failed}`);
-      if (parts.length) new Notice(`知识库同步完成：${parts.join('，')}`, 3000);
+      const label =
+        scope === 'personal' ? '个人知识库同步完成' :
+        scope === 'subscribed' ? '订阅知识库同步完成' :
+        '知识库同步完成';
+      if (parts.length) new Notice(`${label}：${parts.join('，')}`, 3000);
 
     } catch (e) {
       this.handleError(e);
