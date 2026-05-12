@@ -377,8 +377,33 @@ export class GetNoteClient {
     return topics;
   }
 
+  /** 获取知识库内的笔记列表（按知识库分页） */
+  async listKnowledgeNotes(topicId: string, page = 1): Promise<{
+    notes: GetNote[];
+    hasMore: boolean;
+  }> {
+    const url = `${BASE_URL}/open/api/v1/resource/knowledge/notes?topic_id=${topicId}&page=${page}`;
+    const { status, body } = await _doRequest('knowledge-notes', url, this.headers);
+
+    if (!body?.success) {
+      const err = body?.error;
+      if (status === 429 || err?.code === 10202 || err?.code === 10203 || err?.code === 42900) {
+        throw new GetNoteApiError(err?.message || 'rate limited', err?.code, status, true);
+      }
+      if (err?.code === 10001) {
+        throw new GetNoteApiError('凭证无效或已过期，请重新授权', err.code, 401);
+      }
+      throw new GetNoteApiError(err?.message || '获取知识库笔记失败', err?.code, status);
+    }
+
+    return {
+      notes: body.data.notes || [],
+      hasMore: body.data?.has_more ?? false,
+    };
+  }
+
   /** 获取知识库内资源列表（笔记+帖子混合） */
-  async listTopicResources(topicId: string): Promise<{
+  async listTopicResources(topicId: string, cursor?: string): Promise<{
     resources: Array<{
       resource_id: string;
       resource_type: string;
@@ -391,7 +416,7 @@ export class GetNoteClient {
     hasMore: boolean;
     cursor: string;
   }> {
-    const cursorParam = '';
+    const cursorParam = cursor ?? '';
     const url = `${BASE_URL}/open/api/v1/topic/resource/list?topic_id=${topicId}&cursor=${cursorParam}`;
 
     const { status, body } = await _doRequest('topic-resources', url, this.headers);

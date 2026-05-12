@@ -1,6 +1,6 @@
 import { App, TFile, normalizePath, Notice } from 'obsidian';
 import { GetNoteClient, GetNoteApiError } from './getnoteClient';
-import { generateFilename, noteToMarkdown, needsDetail, attachmentFilenameFromUrl, extractInlineImageUrls } from './formatter';
+import { noteToMarkdown, needsDetail, attachmentFilenameFromUrl, extractInlineImageUrls } from './formatter';
 import type { GetBridgeSettings, TopicSyncStats, SyncProgress, KnowledgeTopic, GetNote, GetNoteDetail } from './types';
 
 interface TopicFileEntry {
@@ -64,50 +64,95 @@ export class TopicSyncEngine {
       topicIndices.set(topic.id, await this.buildTopicNoteIndex(topic.name));
     }
 
-    this.emit({ status: 'fetching', message: '正在拉取笔记列表...' });
-
-    // 获取所有笔记，筛选出属于选中知识库的
-    let cursor = '0';
-    let hasMore = true;
-    let processedCount = 0;
-
-    while (hasMore) {
-      let page: { notes: GetNote[]; hasMore: boolean; cursor: string };
-      try {
-        page = await this.client.listNotes(cursor);
-      } catch (e) {
-        const err = e as Error;
-        this.emit({ status: 'error', message: err.message, error: err });
-        throw e;
+    // 为每个知识库跟踪已使用的文件名（不含 .md），用于去重
+    const topicUsedFilenames = new Map<string, Set<string>>();
+    for (const topic of selectedTopics) {
+      const used = new Set<string>();
+      for (const entry of (topicIndices.get(topic.id) ?? new Map()).values()) {
+        const filename = entry.filePath.split('/').pop()?.replace(/\.md$/, '') ?? '';
+        if (filename) used.add(filename);
       }
+      topicUsedFilenames.set(topic.id, used);
+    }
 
-      hasMore = page.hasMore;
-      cursor = page.cursor;
+    this.emit({ status: 'fetching', message: '正在拉取知识库笔记...' });
 
-      for (const note of page.notes) {
-        // 筛选：只处理属于选中知识库的笔记
-        const noteTopicIds = note.topics?.map(t => t.id) ?? [];
-        const matchingTopicIds = noteTopicIds.filter(id => allSelectedIds.includes(id));
-        if (matchingTopicIds.length === 0) continue;
+    // 为每个选中的知识库分别拉取笔记，按 note_id 去重合并
+    const allNotesById = new Map<string, GetNote>();
+    const noteToTopicIds = new Map<string, string[]>();
 
-        stats.total++;
-        processedCount++;
-
+    for (const topic of selectedTopics) {
+      let page = 1;
+      let hasMore = true;
+      while (hasMore) {
+        let result: { notes: GetNote[]; hasMore: boolean };
         try {
-          const result = await this.processNoteForTopics(note, matchingTopicIds, selectedTopics, topicIndices);
+          result = await this.client.listKnowledgeNotes(topic.id, page);
+        } catch (e) {
+          const err = e as Error;
+          this.emit({ status: 'error', message: `获取知识库「${topic.name}」笔记失败：${err.message}`, error: err });
+          throw e;
+        }
+
+        for (const note of result.notes) {
+          allNotesById.set(note.note_id, note);
+          const ids = noteToTopicIds.get(note.note_id) ?? [];
+          if (!ids.includes(topic.id)) {
+            ids.push(topic.id);
+            noteToTopicIds.set(note.note_id, ids);
+          }
+        }
+
+        hasMore = result.hasMore;
+        page++;
+      }
+    }
+
+    // 处理所有去重后的笔记
+    let processedCount = 0;
+    stats.total = allNotesById.size;
+
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS_MS = [500, 1500, 3000];
+
+    for (const [noteId, note] of allNotesById) {
+      const matchingTopicIds = noteToTopicIds.get(noteId) ?? [];
+      processedCount++;
+
+      let attempt = 0;
+      let lastError: unknown;
+      let success = false;
+
+      while (attempt < MAX_RETRIES) {
+        try {
+          const result = await this.processNoteForTopics(note, matchingTopicIds, selectedTopics, topicIndices, topicUsedFilenames);
           if (result === 'created') stats.created++;
           else if (result === 'updated') stats.updated++;
           else stats.skipped++;
+          success = true;
+          lastError = undefined;
+          break;
         } catch (e) {
+          // 限流错误：上层已统一退避，单条笔记不再做重复重试，直接抛出终止整次同步
           if (e instanceof GetNoteApiError && e.rateLimited) {
             this.emit({ status: 'error', message: e.message, error: e });
             throw e;
           }
-          stats.failed++;
+          lastError = e;
+          attempt++;
+          if (attempt < MAX_RETRIES) {
+            await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt - 1] ?? 1000));
+          }
         }
-
-        this.emit({ status: 'processing', processedCount, stats: { created: stats.created, updated: stats.updated, skipped: stats.skipped, failed: stats.failed } });
       }
+
+      if (!success && lastError) {
+        const msg = (lastError as Error)?.message ?? String(lastError);
+        console.warn(`[Get Bridge] 知识库笔记同步失败（已重试 ${MAX_RETRIES} 次）note_id=${noteId}：${msg}`);
+        stats.failed++;
+      }
+
+      this.emit({ status: 'processing', processedCount, stats: { created: stats.created, updated: stats.updated, skipped: stats.skipped, failed: stats.failed } });
     }
 
     // 为每个知识库生成/更新索引文件
@@ -126,8 +171,20 @@ export class TopicSyncEngine {
     note: GetNote,
     matchingTopicIds: string[],
     allTopics: KnowledgeTopic[],
-    topicIndices: Map<string, Map<string, TopicFileEntry>>
+    topicIndices: Map<string, Map<string, TopicFileEntry>>,
+    topicUsedFilenames: Map<string, Set<string>>
   ): Promise<'created' | 'updated' | 'skipped'> {
+    // 早期跳过：若所有匹配知识库本地缓存的 updated_at 均与服务端一致，
+    // 则无需拉详情、下载附件，直接跳过，显著降低无变化时的 API 调用
+    if (matchingTopicIds.length > 0) {
+      const allUpToDate = matchingTopicIds.every(topicId => {
+        const topicIndex = topicIndices.get(topicId);
+        const existing = topicIndex?.get(note.note_id);
+        return existing && existing.updated_at === note.updated_at;
+      });
+      if (allUpToDate) return 'skipped';
+    }
+
     // 按需拉取详情
     let detail: GetNoteDetail;
     if (needsDetail(note)) {
@@ -143,19 +200,19 @@ export class TopicSyncEngine {
 
     let content = noteToMarkdown(detail);
 
-    // 下载附件（图片）
+    // 收集所有需要下载的图片 URL（attachments + content 内联图片），并替换 content 中的路径
+    const attachmentUrls: string[] = [];
     if (this.settings.downloadAttachments) {
-      const urls: string[] = [];
       const seen = new Set<string>();
       for (const att of (detail.attachments ?? [])) {
-        if (att.type === 'image' && !seen.has(att.url)) { seen.add(att.url); urls.push(att.url); }
+        if (att.type === 'image' && !seen.has(att.url)) { seen.add(att.url); attachmentUrls.push(att.url); }
       }
       for (const url of extractInlineImageUrls(content)) {
-        if (!seen.has(url)) { seen.add(url); urls.push(url); }
+        if (!seen.has(url)) { seen.add(url); attachmentUrls.push(url); }
       }
 
-      for (let i = 0; i < urls.length; i++) {
-        const url = urls[i];
+      for (let i = 0; i < attachmentUrls.length; i++) {
+        const url = attachmentUrls[i];
         const filename = attachmentFilenameFromUrl(url, `${note.note_id}_${i}`);
         content = content.replaceAll(url, `attachments/${filename}`);
       }
@@ -176,24 +233,26 @@ export class TopicSyncEngine {
       }
 
       const baseDir = normalizePath(`${this.settings.knowledgeBaseDir}/${this.sanitizeDirName(topic.name)}`);
-      const targetFilePath = existing?.filePath
-        ?? normalizePath(`${baseDir}/${generateFilename(note)}.md`);
+
+      let targetFilePath: string;
+      if (existing?.filePath) {
+        targetFilePath = existing.filePath;
+      } else {
+        const used = topicUsedFilenames.get(topicId)!;
+        let filename = this.sanitizeFilename(note.title || '未命名笔记');
+        if (used.has(filename)) {
+          filename = `${filename}_${note.note_id}`;
+        }
+        used.add(filename);
+        targetFilePath = normalizePath(`${baseDir}/${filename}.md`);
+      }
       const targetDir = targetFilePath.substring(0, targetFilePath.lastIndexOf('/'));
 
-      // 下载附件到知识库目录
-      if (this.settings.downloadAttachments) {
-        const urls: string[] = [];
-        const seen = new Set<string>();
-        for (const att of (detail.attachments ?? [])) {
-          if (att.type === 'image' && !seen.has(att.url)) { seen.add(att.url); urls.push(att.url); }
-        }
-        for (const url of extractInlineImageUrls(content)) {
-          if (!seen.has(url)) { seen.add(url); urls.push(url); }
-        }
-
+      // 下载附件到知识库目录（复用已收集的 URL 列表）
+      if (this.settings.downloadAttachments && attachmentUrls.length > 0) {
         const attDir = normalizePath(`${targetDir}/attachments`);
-        for (let i = 0; i < urls.length; i++) {
-          const url = urls[i];
+        for (let i = 0; i < attachmentUrls.length; i++) {
+          const url = attachmentUrls[i];
           const filename = attachmentFilenameFromUrl(url, `${note.note_id}_${i}`);
           const absPath = normalizePath(`${attDir}/${filename}`);
           await this.downloadAttachment(url, absPath);
@@ -231,12 +290,11 @@ export class TopicSyncEngine {
 
     const entries = await Promise.all(
       files.map(async file => {
-        const match = file.name.match(/_(\d{10,})\.md$/);
-        if (!match) return null;
         try {
           const content = await this.app.vault.read(file);
+          const noteId = this.extractFrontmatterField(content, 'note_id');
           const updated_at = this.extractFrontmatterField(content, 'updated_at');
-          if (updated_at) return { noteId: match[1], filePath: file.path, updated_at };
+          if (noteId && updated_at) return { noteId, filePath: file.path, updated_at };
         } catch { /* ignore */ }
         return null;
       })
@@ -325,6 +383,14 @@ export class TopicSyncEngine {
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 80);
+  }
+
+  /** 保留标题原貌，仅替换非法文件名字符 */
+  private sanitizeFilename(name: string): string {
+    return name
+      .replace(/[<>\":/\\|?*\x00-\x1f]/g, '_')
+      .trim()
+      .slice(0, 120);
   }
 
   private escapeYaml(text: string): string {
