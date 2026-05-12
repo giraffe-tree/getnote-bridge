@@ -48,6 +48,9 @@ export class GetBridgeSettingTab extends PluginSettingTab {
   plugin: GetBridgePlugin;
   private currentTab = 'overview';
   private contentContainer: HTMLElement | null = null;
+  // 知识库列表缓存：display() 进入时重置，tab 切换时复用，不会触发 API
+  private topicListCache: Array<{ id: string; name: string }> | null = null;
+  private subscribedTopicListCache: Array<{ id: string; name: string }> | null = null;
   private static readonly HEATMAP_WEEKS = 53;
 
   private readonly tabs: TabDef[] = [
@@ -65,6 +68,10 @@ export class GetBridgeSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass('flomo-settings-container');
+
+    // 设置界面打开：重置知识库缓存，进入「配置」时会触发一次刷新
+    this.topicListCache = null;
+    this.subscribedTopicListCache = null;
 
     this.renderTabNav(containerEl);
     this.contentContainer = containerEl.createDiv({ cls: 'flomo-tab-content' });
@@ -452,7 +459,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
 
     // Sync config card
     const syncCard = container.createDiv({ cls: 'flomo-settings-card' });
-    new Setting(syncCard).setName('同步配置').setHeading();
+    new Setting(syncCard).setName('笔记同步配置').setHeading();
 
     const targetDirSetting = new Setting(syncCard)
       .setName('同步目标目录')
@@ -552,7 +559,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
     const topicListContainer = kbCard.createDiv({ cls: 'flomo-settings-card topic-list-container' });
     topicListContainer.style.display = 'none';
 
-    let topicList: Array<{ id: string; name: string }> = [];
+    let topicList: Array<{ id: string; name: string }> = this.topicListCache ?? [];
 
     const renderTopicList = () => {
       topicListContainer.empty();
@@ -587,6 +594,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
       try {
         const client = new GetNoteClient(this.plugin.settings.apiKey, this.plugin.settings.clientId);
         topicList = await client.listTopics();
+        this.topicListCache = topicList;
         topicListContainer.style.display = 'block';
         renderTopicList();
       } catch (e) {
@@ -620,7 +628,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
     const subscribedTopicListContainer = kbCard.createDiv({ cls: 'flomo-settings-card topic-list-container' });
     subscribedTopicListContainer.style.display = 'none';
 
-    let subscribedTopicList: Array<{ id: string; name: string }> = [];
+    let subscribedTopicList: Array<{ id: string; name: string }> = this.subscribedTopicListCache ?? [];
 
     const renderSubscribedTopicList = () => {
       subscribedTopicListContainer.empty();
@@ -655,6 +663,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
       try {
         const client = new GetNoteClient(this.plugin.settings.apiKey, this.plugin.settings.clientId);
         subscribedTopicList = await client.listSubscribedTopics();
+        this.subscribedTopicListCache = subscribedTopicList;
         subscribedTopicListContainer.style.display = 'block';
         renderSubscribedTopicList();
       } catch (e) {
@@ -680,15 +689,22 @@ export class GetBridgeSettingTab extends PluginSettingTab {
       });
     });
 
-    // 进入配置界面时自动获取列表（已授权）
+    // 列表展示策略：
+    // - 设置界面打开（display() 重置缓存）：调一次接口拉取最新列表
+    // - 概览/配置/操作 tab 切换：复用缓存渲染，不再调接口
     if (this.plugin.settings.apiKey) {
-      topicListContainer.style.display = 'block';
-      void loadTopicList();
-      void loadSubscribedTopicList();
-    } else if (this.plugin.settings.selectedTopicIds.length > 0 || this.plugin.settings.selectedSubscribedTopicIds.length > 0) {
-      topicListContainer.style.display = 'block';
-      void loadTopicList();
-      void loadSubscribedTopicList();
+      if (this.topicListCache === null) {
+        void loadTopicList();
+      } else {
+        topicListContainer.style.display = 'block';
+        renderTopicList();
+      }
+      if (this.subscribedTopicListCache === null) {
+        void loadSubscribedTopicList();
+      } else {
+        subscribedTopicListContainer.style.display = 'block';
+        renderSubscribedTopicList();
+      }
     }
 
     // Dev options
@@ -711,7 +727,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
 
   private renderActionsTab(container: HTMLElement): void {
     const syncCard = container.createDiv({ cls: 'flomo-settings-card' });
-    new Setting(syncCard).setName('同步操作').setHeading();
+    new Setting(syncCard).setName('笔记同步').setHeading();
 
     new Setting(syncCard)
       .setName('立即同步')
@@ -796,7 +812,7 @@ export class GetBridgeSettingTab extends PluginSettingTab {
 
     new Setting(dangerCard)
       .setName('清除本地数据')
-      .setDesc('删除同步目录中的所有笔记文件（不可恢复）')
+      .setDesc('删除同步目录中的所有笔记、附件及子目录（不可恢复），下次同步时按需重建')
       .addButton(btn =>
         btn.setButtonText('清除').setWarning().onClick(async () => {
           await this.clearLocalData();
@@ -912,9 +928,31 @@ export class GetBridgeSettingTab extends PluginSettingTab {
 
   private async clearLocalData(): Promise<void> {
     const dir = normalizePath(this.plugin.settings.targetDir);
-    const files = this.app.vault.getMarkdownFiles().filter(f => f.path.startsWith(dir + '/'));
-    for (const f of files) await this.app.fileManager.trashFile(f);
-    new Notice(`已清除 ${files.length} 个文件`);
+    const folder = this.app.vault.getAbstractFileByPath(dir);
+    if (!(folder instanceof TFolder)) {
+      new Notice(`同步目录不存在：${dir}`);
+      return;
+    }
+    // 整目录回收：含笔记、附件以及空子目录，下次同步时按需重建
+    const removed = this.countDescendants(folder);
+    try {
+      await this.app.fileManager.trashFile(folder);
+      new Notice(`已清除同步目录及其全部内容（${removed} 项）`);
+    } catch (e) {
+      new Notice(`清除失败：${(e as Error).message}`);
+    }
+  }
+
+  private countDescendants(folder: TFolder): number {
+    let n = 0;
+    for (const child of folder.children) {
+      if (child instanceof TFolder) {
+        n += 1 + this.countDescendants(child);
+      } else {
+        n++;
+      }
+    }
+    return n;
   }
 
   private relativeTime(ts: number): string {
