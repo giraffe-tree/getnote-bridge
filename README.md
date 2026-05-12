@@ -26,6 +26,9 @@ Sync your [Get 笔记](https://biji.com) notes into Obsidian.
 - **Overview dashboard** — status cards, latest note preview, annual activity heatmap
 - **OAuth login** — one-click browser auth, no manual token copy-paste
 
+
+![img.png](img.png)
+
 ---
 
 ## 安装 / Installation
