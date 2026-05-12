@@ -11,6 +11,7 @@ export default class GetBridgePlugin extends Plugin {
   isSyncing = false;
   private statusBar!: StatusBarManager;
   private syncIntervalId: number | null = null;
+  private topicSyncIntervalId: number | null = null;
   settingsTab?: GetBridgeSettingTab;
 
   async onload(): Promise<void> {
@@ -40,6 +41,10 @@ export default class GetBridgePlugin extends Plugin {
       window.clearInterval(this.syncIntervalId);
       this.syncIntervalId = null;
     }
+    if (this.topicSyncIntervalId !== null) {
+      window.clearInterval(this.topicSyncIntervalId);
+      this.topicSyncIntervalId = null;
+    }
     this.statusBar?.unload();
   }
 
@@ -56,8 +61,20 @@ export default class GetBridgePlugin extends Plugin {
       window.clearInterval(this.syncIntervalId);
       this.syncIntervalId = null;
     }
+    if (this.topicSyncIntervalId !== null) {
+      window.clearInterval(this.topicSyncIntervalId);
+      this.topicSyncIntervalId = null;
+    }
     if (this.settings.syncInterval > 0) {
       this.syncIntervalId = window.setInterval(() => void this.performSync(), this.settings.syncInterval * 1000);
+    }
+    if (this.settings.topicSyncInterval > 0) {
+      this.topicSyncIntervalId = window.setInterval(() => {
+        if (!this.settings.apiKey || this.isSyncing) return;
+        const hasTopics = this.settings.selectedTopicIds.length > 0 || this.settings.selectedSubscribedTopicIds.length > 0;
+        if (!hasTopics) return;
+        void this.performTopicSync();
+      }, this.settings.topicSyncInterval * 1000);
     }
   }
 

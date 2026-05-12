@@ -12,13 +12,14 @@ export const DEFAULT_SETTINGS: GetBridgeSettings = {
   targetDir: 'GetNotes',
   noteTypes: ['plain_text', 'img_text', 'link', 'audio', 'meeting', 'local_audio', 'internal_record', 'class_audio', 'recorder_audio', 'recorder_flash_audio'],
   downloadAttachments: true,
-  syncInterval: 3600,
+  syncInterval: 300,
   debugMode: false,
   cursor: '',
   lastSyncStats: undefined,
   knowledgeBaseDir: 'GetNotes/KnowledgeBase',
   selectedTopicIds: [],
   selectedSubscribedTopicIds: [],
+  topicSyncInterval: 3600,
 };
 
 interface TabDef { id: string; label: string; icon: string; }
@@ -335,6 +336,24 @@ export class GetBridgeSettingTab extends PluginSettingTab {
     kbPathContainer.createSpan({ text: '完整路径: ', cls: 'flomo-full-path-label' });
     const kbPathEl = kbPathContainer.createSpan({ cls: 'flomo-full-path-value' });
     this.updatePathDisplay(kbPathEl, this.plugin.settings.knowledgeBaseDir);
+
+    new Setting(kbCard)
+      .setName('自动同步间隔')
+      .setDesc('设置后会按间隔自动同步选中的知识库')
+      .addDropdown(dd =>
+        dd
+          .addOption('0',     '手动同步')
+          .addOption('1800',  '30分钟')
+          .addOption('3600',  '1小时')
+          .addOption('7200',  '2小时')
+          .addOption('21600', '6小时')
+          .setValue(String(this.plugin.settings.topicSyncInterval))
+          .onChange(async value => {
+            this.plugin.settings.topicSyncInterval = parseInt(value, 10);
+            await this.plugin.saveSettings();
+            this.plugin.setupAutoSync();
+          })
+      );
 
     // 个人知识库选择
     const personalTopicSetting = new Setting(kbCard)

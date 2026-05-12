@@ -83,6 +83,7 @@ export interface GetBridgeSettings {
   knowledgeBaseDir: string;     // 知识库存储目录，默认 GetNotes/KnowledgeBase
   selectedTopicIds: string[];   // 用户选择同步的个人知识库 ID 列表
   selectedSubscribedTopicIds: string[]; // 用户选择同步的订阅知识库 ID 列表
+  topicSyncInterval: number;    // 知识库自动同步间隔（秒），0=手动
 }
 
 export interface LastSyncStats {
