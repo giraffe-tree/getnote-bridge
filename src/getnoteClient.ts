@@ -294,10 +294,21 @@ export class GetNoteClient {
   }
 
   async downloadFile(url: string): Promise<ArrayBuffer | null> {
+    // 走与 API 调用同一条 2 QPS 限速通道，避免知识库同步期间大量附件下载触发服务端限流
+    await _throttleSlot();
+    _recordRequest();
+    const t0 = Date.now();
     try {
       const resp = await requestUrl({ url, method: 'GET' });
+      const { req10s, req60s } = _reqStats();
+      const elapsed = Date.now() - t0;
+      const tag = resp.status === 200 ? 'ok' : 'error';
+      const fn = resp.status === 200 ? console.log : console.warn;
+      fn(`[GetNote ${_hms()}] download ${tag} status=${resp.status} ${elapsed}ms req10s=${req10s} req60s=${req60s}`);
       return resp.status === 200 ? resp.arrayBuffer : null;
-    } catch {
+    } catch (e) {
+      const { req10s, req60s } = _reqStats();
+      console.warn(`[GetNote ${_hms()}] download error status=0 ${Date.now() - t0}ms req10s=${req10s} req60s=${req60s} msg="${(e as Error).message}"`);
       return null;
     }
   }
